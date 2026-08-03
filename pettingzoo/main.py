@@ -1,4 +1,7 @@
-import gymnasium as gym, torch
+import gymnasium as gym
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 env = gym.make('FrozenLake-v1', map_name="8x8", render_mode="human")
 observation_initial, info = env.reset()
@@ -12,41 +15,75 @@ obs_size = env.observation_space.n
 act_size = env.action_space.n
 
 def one_hot(o):
-    return torch.nn.functional.one_hot(torch.tensor(o), num_classes=obs_size).to(torch.float32)
+    return F.one_hot(torch.tensor(o), num_classes=obs_size).to(torch.float32)
 
-actor = torch.nn.Sequential(
-    torch.nn.Linear(obs_size, 10),
-    torch.nn.ReLU(),
-    torch.nn.Linear(10, act_size)
-)
+class Actor(nn.Module):
+    def __init__(self):
+        super().__init__()
 
-critic = torch.nn.Sequential(
-    torch.nn.Linear(obs_size, 10),
-    torch.nn.ReLU(),
-    torch.nn.Linear(10, 1)
-)
+        self.inputL = nn.Linear(obs_size, 10)
+        self.activation = nn.ReLU()
+        self.outputL = nn.Linear(10, act_size)
+
+    def forward(self, inp):
+        inp = self.inputL(inp)
+        inp = self.activation(inp)
+        inp = self.outputL(inp)
+        return inp
+
+class Critic(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.inputL = nn.Linear(obs_size, 10)
+        self.activation = nn.ReLU()
+        self.outputL = nn.Linear(10, 1)
+
+    def forward(self, inp):
+        inp = self.inputL(inp)
+        inp = self.activation(inp)
+        inp = self.outputL(inp)
+        return inp
+
+actor = Actor()
+critic = Critic()
+
+actor_optimizer = torch.optim.adam.Adam(actor.parameters())
+critic_optimizer = torch.optim.adam.Adam(critic.parameters()) 
 
 print(one_hot(observation_initial).dtype)
 
 print(actor(one_hot(observation_initial)))
 print(critic(one_hot(observation_initial)))
 
-batch = 32
+rollout_episodes = 32
+gamma = 0.99
+lambda_gae = 0.95
 trajectories = []
-for i in range(batch):
+for i in range(rollout_episodes):
     current = []
     observation, _ = env.reset()
+    observation = one_hot(observation)
     while True:
-        logits = actor(one_hot(observation))
+        logits = actor(observation)
         actions_dist = torch.distributions.categorical.Categorical(logits=logits)
         action = actions_dist.sample().item()
 
         new_observation, reward, terminated, truncated, info = env.step(action)
-        current.append((observation, action, actions_dist[action], reward))
-        observation = new_observation
+        current.append({"obs": observation, 
+                        "act": action, 
+                        "log": actions_dist.log_prob(action).item(), 
+                        "val": critic(observation).item(), 
+                        "rew": reward})
+        observation = one_hot(new_observation)
 
         if terminated or truncated:
             break
+
+    for j in reversed(range(len(current))):
+        current[j]["disc_val"] = current[j]["rew"] + current[j+1]["disc_val"] * gamma if j != len(current)-1 else current[j]["rew"] # discounted value
+        delta = current[j+1]["rew"] + gamma * current[j+1]["val"] - current[j]["val"] if j != len(current)-1 else 0
+        current[j]["adv"] = delta + gamma * lambda_gae * current[j+1]["adv"] if j != len(current)-1 else 0
 
     trajectories.append(current)
 
