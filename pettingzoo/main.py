@@ -2,8 +2,10 @@ import gymnasium as gym
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import random
 
-env = gym.make('FrozenLake-v1', map_name="8x8", render_mode="human")
+#env = gym.make('FrozenLake-v1', map_name="8x8", render_mode="human")
+env = gym.make('FrozenLake-v1', map_name="8x8")
 observation_initial, info = env.reset()
 
 print(env.action_space)
@@ -48,8 +50,8 @@ class Critic(nn.Module):
 actor = Actor()
 critic = Critic()
 
-actor_optimizer = torch.optim.adam.Adam(actor.parameters())
-critic_optimizer = torch.optim.adam.Adam(critic.parameters()) 
+actor_optimizer = torch.optim.Adam(actor.parameters())
+critic_optimizer = torch.optim.Adam(critic.parameters()) 
 
 print(one_hot(observation_initial).dtype)
 
@@ -72,7 +74,7 @@ for i in range(rollout_episodes):
         new_observation, reward, terminated, truncated, info = env.step(action)
         current.append({"obs": observation, 
                         "act": action, 
-                        "log": actions_dist.log_prob(action).item(), 
+                        "log": actions_dist.log_prob(torch.tensor(action)).item(), 
                         "val": critic(observation).item(), 
                         "rew": reward})
         observation = one_hot(new_observation)
@@ -82,9 +84,18 @@ for i in range(rollout_episodes):
 
     for j in reversed(range(len(current))):
         current[j]["disc_val"] = current[j]["rew"] + current[j+1]["disc_val"] * gamma if j != len(current)-1 else current[j]["rew"] # discounted value
-        delta = current[j+1]["rew"] + gamma * current[j+1]["val"] - current[j]["val"] if j != len(current)-1 else 0
+        delta = current[j]["rew"] + gamma * current[j+1]["val"] - current[j]["val"] if j != len(current)-1 else 0
         current[j]["adv"] = delta + gamma * lambda_gae * current[j+1]["adv"] if j != len(current)-1 else 0
 
-    trajectories.append(current)
+    trajectories.extend(current)
+
+advantages = torch.tensor([step["adv"] for step in trajectories])
+adv_mean = advantages.mean()
+adv_std = advantages.std()
+for step in trajectories:
+    step["adv"] -= adv_mean
+    step["adv"] /= adv_std
+
+random.shuffle(trajectories)
 
 print(trajectories)
