@@ -89,13 +89,59 @@ for i in range(rollout_episodes):
 
     trajectories.extend(current)
 
+random.shuffle(trajectories)
+
 advantages = torch.tensor([step["adv"] for step in trajectories])
+actions = torch.tensor([step["act"] for step in trajectories])
 adv_mean = advantages.mean()
 adv_std = advantages.std()
+
 for step in trajectories:
     step["adv"] -= adv_mean
     step["adv"] /= adv_std
 
-random.shuffle(trajectories)
+#print(trajectories)
 
-print(trajectories)
+minibatch_size = 8
+split_trajectories = [trajectories[i*minibatch_size:(i+1)*minibatch_size] for i in range(len(trajectories) // minibatch_size)]
+print("# of batches:", len(split_trajectories))
+
+epsilon = 0.2
+value_loss_coef = 0.5
+entropy_coef = 0.01
+
+for batch in split_trajectories:
+    batch_dict = {}
+    for key in batch[0].keys():
+        if key == "obs":
+            batch_dict[key] = torch.stack([t[key] for t in batch])
+        else:
+            batch_dict[key] = torch.tensor([t[key] for t in batch])
+
+    
+    new_logits = actor(batch_dict["obs"])
+    new_actions_dist = torch.distributions.categorical.Categorical(logits=new_logits)
+    new_values = critic(batch_dict["obs"])
+
+    print("logits shape (new action)", new_logits.shape)
+    print(new_logits)
+    print("logits shape (old action)", batch_dict["act"].shape)
+    print(batch_dict["act"])
+    print("values shape", new_values.shape)
+
+    new_actions = new_actions_dist.sample()
+    new_log_probs = new_actions_dist.log_prob(new_actions)
+    print("new actions:", new_actions)
+
+    print("old logp shape", batch_dict["log"].shape)
+    print("new logp shape", new_log_probs.shape)
+
+    ratio = torch.exp(new_log_probs - batch_dict["log"])
+    surr1 = ratio * batch_dict["adv"]
+    surr2 = torch.clamp(ratio, 1 - epsilon, 1 + epsilon) * batch_dict["adv"]
+    clipped_surr = torch.min(surr1, surr2)
+    surr_loss = -clipped_surr.mean()
+    value_loss = ((new_values - batch_dict["disc_val"]) ** 2).mean()
+    entorpy = new_actions_dist.entropy().mean()
+    loss = surr_loss + value_loss_coef * value_loss - entropy_coef * entorpy
+    print("LOSS:", loss)
