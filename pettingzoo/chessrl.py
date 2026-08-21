@@ -13,6 +13,8 @@ print(*(f"Act space for {i}: {env.action_space(i)}\n" for i in env.agents))
 
 OBSERVATION_SIZE = 8 * 8 * 111
 ACTION_SIZE = 4672
+GAMMA = 0.99
+LAMBDA = 0.95
 ACTOR_LAYER_SIZES = [OBSERVATION_SIZE, 256, 256, ACTION_SIZE]
 CRITIC_LAYER_SIZES = [OBSERVATION_SIZE, 256, 256, 1]
 
@@ -27,6 +29,8 @@ class Timestep:
     value : float
     agent : str
     done : bool
+    advantage : float = None
+    discounted_return : float = None
 
 @dataclass
 class Parameters:
@@ -96,6 +100,26 @@ def collect_trajectories(key : Array, timesteps : int, parameters_0 : Parameters
         env.reset()
     return trajectories
 
+def compute_advantages(trajectories : list[Timestep]) -> list[Timestep]:
+    prev_advantage = {"player_0" : 0, "player_1" : 0}
+    prev_value = {"player_0" : 0, "player_1" : 0}
+    for timestep in reversed(trajectories):
+        if timestep.done:
+            prev_advantage = {"player_0" : 0, "player_1" : 0}
+            prev_value = {"player_0" : 0, "player_1" : 0}
+        delta = timestep.reward + GAMMA * prev_value[timestep.agent] - timestep.value
+        timestep.advantage = delta + (GAMMA * LAMBDA) * prev_advantage[timestep.agent]
+        timestep.discounted_return = timestep.advantage + timestep.value
+        prev_advantage[timestep.agent] = timestep.advantage
+        prev_value[timestep.agent] = timestep.value
+    advantages = jnp.array([t.advantage for t in trajectories])
+    mean = jnp.mean(advantages)
+    std = jnp.maximum(jnp.std(advantages), 1e-8)
+    for timestep in trajectories:
+        timestep.advantage -= mean
+        timestep.advantage /= std
+    return trajectories
+
 if __name__ == "__main__":
     k1, k2 = random.split(key, 2)
     p0 = initialize_parameters(k1, ACTOR_LAYER_SIZES, CRITIC_LAYER_SIZES)
@@ -110,3 +134,9 @@ if __name__ == "__main__":
     rollout = collect_trajectories(key, 2048, p0, p1)
   #  print(rollout)
     print("ROLLOUT SIZE:", len(rollout))
+    i = 0
+    for x in rollout:
+        i += 1 if x.done else 0
+    print("Num of episodes:", i)
+    rollout = compute_advantages(rollout)
+    print(*(j.advantage for j in rollout))
