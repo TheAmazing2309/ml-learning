@@ -1,5 +1,7 @@
 from pettingzoo import make
 import time
+import optax
+import random as rand
 import jax
 from jax import random, Array, lax, nn, numpy as jnp
 from dataclasses import dataclass
@@ -87,7 +89,7 @@ def collect_trajectories(key : Array, timesteps : int, parameters_0 : Parameters
             masked_log_probs = nn.log_softmax(masked_actor_logits)
             value = network_forward(parameters[agent].critic, observation["observation"])
             action_index = int(random.categorical(keys[timesteps], masked_actor_logits))
-            trajectories.append(Timestep(obs=observation, 
+            trajectories.append(Timestep(obs=observation["observation"], 
                                         reward=reward, 
                                         log_prob=masked_log_probs[action_index], 
                                         action=action_index, 
@@ -120,23 +122,63 @@ def compute_advantages(trajectories : list[Timestep]) -> list[Timestep]:
         timestep.advantage /= std
     return trajectories
 
+def compute_loss_grads(
+        parameters : Parameters,
+        batch : list[Timestep],
+        epsilon : float = 0.2,
+        vf_coef : float = 0.5,
+        ent_coef : float = 0.01
+) -> tuple[float, Parameters]:
+    observations = jnp.stack([t.obs for t in batch])
+    actions = jnp.array([t.action for t in batch])
+    old_log_probs = jnp.array([t.log_prob for t in batch])
+    advantages = jnp.array([t.advantage for t in batch])
+    discounted_returns = jnp.array([t.discounted_return for t in batch])
+    new_logits = jax.vmap(lambda obs: network_forward(parameters.actor, obs))(observations)
+    new_values = jax.vmap(lambda obs: network_forward(parameters.critic, obs))(observations)
+    new_log_probs = nn.log_softmax(new_logits)[:,actions]
+    return None
+
+def train(
+        epochs : int, 
+        batches : int, 
+        rollout : list[Timestep], 
+        parameters_0 : Parameters, 
+        parameters_1 : Parameters,
+        optimizer_0 : optax.GradientTransformation,
+        optimizer_1 : optax.GradientTransformation
+) -> tuple[Parameters, Parameters]:
+    assert len(rollout) % batches == 0
+    batch_size = len(rollout) // batches
+    opt_state_0 = optimizer_0.init(parameters_0)
+    opt_state_1 = optimizer_1.init(parameters_1)
+    for epoch in range(epochs):
+        rollout = rand.shuffle(rollout)
+        batched_rollout = [rollout[i * batch_size : (i+1) * batch_size] for i in range(batches)]
+        for batch in batched_rollout:
+            batch_0 = [t for t in batch if t.agent == "player_0"]
+            batch_1 = [t for t in batch if t.agent == "player_1"]
+
+
 if __name__ == "__main__":
     k1, k2 = random.split(key, 2)
     p0 = initialize_parameters(k1, ACTOR_LAYER_SIZES, CRITIC_LAYER_SIZES)
     p1 = initialize_parameters(k2, ACTOR_LAYER_SIZES, CRITIC_LAYER_SIZES)
-    # print(actor_parameters)
-    # print(critic_parameters)
-    sample_observation = env.observe(env.agents[0])["observation"]
-    print(network_forward(p0.critic, sample_observation))
-    start = time.time()
-    result = network_forward(p0.critic, sample_observation)
-    print(time.time() - start)
     rollout = collect_trajectories(key, 2048, p0, p1)
-  #  print(rollout)
-    print("ROLLOUT SIZE:", len(rollout))
-    i = 0
-    for x in rollout:
-        i += 1 if x.done else 0
-    print("Num of episodes:", i)
-    rollout = compute_advantages(rollout)
-    print(*(j.advantage for j in rollout))
+    compute_loss_grads(p0, rollout)
+#     # print(actor_parameters)
+#     # print(critic_parameters)
+#     sample_observation = env.observe(env.agents[0])["observation"]
+#     print(network_forward(p0.critic, sample_observation))
+#     start = time.time()
+#     result = network_forward(p0.critic, sample_observation)
+#     print(time.time() - start)
+#     
+#   #  print(rollout)
+#     print("ROLLOUT SIZE:", len(rollout))
+#     i = 0
+#     for x in rollout:
+#         i += 1 if x.done else 0
+#     print("Num of episodes:", i)
+#     rollout = compute_advantages(rollout)
+#     print(*(j.advantage for j in rollout))
