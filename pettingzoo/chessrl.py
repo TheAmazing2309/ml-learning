@@ -3,7 +3,7 @@ import time
 import optax
 import random as rand
 import jax
-from jax import random, Array, lax, nn, numpy as jnp
+from jax import random, Array, lax, nn, tree_util, numpy as jnp
 from dataclasses import dataclass
 
 env = make("aec", "classic/chess-v6")
@@ -38,6 +38,18 @@ class Timestep:
 class Parameters:
     actor : dict[str, Array]
     critic : dict[str, Array]
+
+def _flatten_parameters(params):
+    return (params.actor, params.critic), None
+
+def _unflatten_parameters(aux, children):
+    return Parameters(actor=children[0], critic=children[1])
+
+jax.tree_util.register_pytree_node(
+    Parameters,
+    _flatten_parameters,
+    _unflatten_parameters,
+)
 
 def initialize_parameters(key : Array, actor_layer_sizes : list[int], critic_layer_sizes : list[int]) -> Parameters:
     actor_key, critic_key = random.split(key, 2)
@@ -134,10 +146,18 @@ def compute_loss_grads(
     old_log_probs = jnp.array([t.log_prob for t in batch])
     advantages = jnp.array([t.advantage for t in batch])
     discounted_returns = jnp.array([t.discounted_return for t in batch])
-    new_logits = jax.vmap(lambda obs: network_forward(parameters.actor, obs))(observations)
-    new_values = jax.vmap(lambda obs: network_forward(parameters.critic, obs))(observations)
-    new_log_probs = nn.log_softmax(new_logits)[:,actions]
-    return None
+    def loss(parameters : Parameters) -> float:
+        new_logits = jax.vmap(lambda obs: network_forward(parameters.actor, obs))(observations)
+        new_values = jax.vmap(lambda obs: network_forward(parameters.critic, obs))(observations)
+        new_log_probs = nn.log_softmax(new_logits)[jnp.arange(len(batch)),actions]
+        ratio = jnp.exp(new_log_probs - old_log_probs)
+        surrogate_1 = ratio * advantages
+        surrogate_2 = jnp.clip(ratio, 1 - epsilon, 1 + epsilon) * advantages
+        policy_loss = -jnp.mean(jnp.minimum(surrogate_1, surrogate_2))
+        value_loss = jnp.mean((new_values - discounted_returns) ** 2)
+        entropy = -jnp.mean(jnp.sum(nn.softmax(new_logits) * nn.log_softmax(new_logits), axis=1))
+        return policy_loss + vf_coef * value_loss - ent_coef * entropy
+    return jax.value_and_grad(loss)(parameters)
 
 def train(
         epochs : int, 
@@ -153,19 +173,31 @@ def train(
     opt_state_0 = optimizer_0.init(parameters_0)
     opt_state_1 = optimizer_1.init(parameters_1)
     for epoch in range(epochs):
-        rollout = rand.shuffle(rollout)
+        print(f"---EPOCH {epoch+1}---")
+        rand.shuffle(rollout)
         batched_rollout = [rollout[i * batch_size : (i+1) * batch_size] for i in range(batches)]
-        for batch in batched_rollout:
+        for i, batch in enumerate(batched_rollout):
+            print(f"---BATCH {i+1}/{batches}---")
             batch_0 = [t for t in batch if t.agent == "player_0"]
             batch_1 = [t for t in batch if t.agent == "player_1"]
-
+            if batch_0:
+                loss_0, grads_0 = compute_loss_grads(parameters_0, batch_0)
+                updates_0, opt_state_0 = optimizer_0.update(grads_0, opt_state_0)
+                parameters_0 = optax.apply_updates(parameters_0, updates_0)
+            if batch_1:
+                loss_1, grads_1 = compute_loss_grads(parameters_1, batch_1)
+                updates_1, opt_state_1 = optimizer_1.update(grads_1, opt_state_1)
+                parameters_1 = optax.apply_updates(parameters_1, updates_1)
+    return parameters_0, parameters_1
 
 if __name__ == "__main__":
     k1, k2 = random.split(key, 2)
     p0 = initialize_parameters(k1, ACTOR_LAYER_SIZES, CRITIC_LAYER_SIZES)
     p1 = initialize_parameters(k2, ACTOR_LAYER_SIZES, CRITIC_LAYER_SIZES)
-    rollout = collect_trajectories(key, 2048, p0, p1)
-    compute_loss_grads(p0, rollout)
+    o0 = optax.adam(learning_rate=3e-4)
+    o1 = optax.adam(learning_rate=3e-4)
+    rollout = compute_advantages(collect_trajectories(key, 2048, p0, p1))
+    p0, p1 = train(3, 128, rollout, p0, p1, o0, o1)
 #     # print(actor_parameters)
 #     # print(critic_parameters)
 #     sample_observation = env.observe(env.agents[0])["observation"]
