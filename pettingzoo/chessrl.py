@@ -177,7 +177,7 @@ def train(
         rand.shuffle(rollout)
         batched_rollout = [rollout[i * batch_size : (i+1) * batch_size] for i in range(batches)]
         for i, batch in enumerate(batched_rollout):
-            print(f"---BATCH {i+1}/{batches}---")
+         #   print(f"---BATCH {i+1}/{batches}---")
             batch_0 = [t for t in batch if t.agent == "player_0"]
             batch_1 = [t for t in batch if t.agent == "player_1"]
             if batch_0:
@@ -190,14 +190,48 @@ def train(
                 parameters_1 = optax.apply_updates(parameters_1, updates_1)
     return parameters_0, parameters_1
 
+def evaluate(
+        parameters_0 : Parameters,
+        parameters_1 : Parameters,
+        num_games : int = 100
+) -> tuple[int, int ,int]:
+    wins_0 = 0
+    wins_1 = 0
+    draws = 0
+    for game in range(num_games):
+        env.reset()
+        for agent in env.agent_iter():
+            obs_dict, reward, termination, truncation, info = env.last()
+            obs = obs_dict["observation"].astype(jnp.float32)
+            mask = obs_dict["action_mask"]
+            params = parameters_0 if agent == "player_0" else parameters_1
+            logits = network_forward(params.actor, obs)
+            masked_logits = jnp.where(mask == 1, logits, -jnp.inf)
+            action = int(jnp.argmax(masked_logits))
+            if termination or truncation:
+                if reward == 1:
+                    if agent == "player_0":
+                        wins_0 += 1
+                    else:
+                        wins_1 += 1
+                elif reward == 0 and termination:
+                        draws += 1
+                break
+            env.step(action)
+    return wins_0, wins_1, draws
+
+
 if __name__ == "__main__":
     k1, k2 = random.split(key, 2)
     p0 = initialize_parameters(k1, ACTOR_LAYER_SIZES, CRITIC_LAYER_SIZES)
     p1 = initialize_parameters(k2, ACTOR_LAYER_SIZES, CRITIC_LAYER_SIZES)
     o0 = optax.adam(learning_rate=3e-4)
     o1 = optax.adam(learning_rate=3e-4)
-    rollout = compute_advantages(collect_trajectories(key, 2048, p0, p1))
-    p0, p1 = train(3, 128, rollout, p0, p1, o0, o1)
+    print(evaluate(p0, p1))
+    for i in range(5):
+        rollout = compute_advantages(collect_trajectories(key, 2048, p0, p1))
+        p0, p1 = train(3, 128, rollout, p0, p1, o0, o1)
+        print(evaluate(p0, p1))
 #     # print(actor_parameters)
 #     # print(critic_parameters)
 #     sample_observation = env.observe(env.agents[0])["observation"]
